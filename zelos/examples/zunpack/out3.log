@@ -1,0 +1,17 @@
+[main] [SYSCALL] brk ( addr=0x0 ) -> 90000060
+[main] [SYSCALL] brk ( addr=0x90000da0 ) -> 90000da0
+[main] [SYSCALL] set_thread_area ( u_info=0xff08edd0 ) -> 0
+[main] [SYSCALL] uname ( buf=0xff08ec6a ) -> 0
+[main] [SYSCALL] readlink ( pathname=0x80c2ad2 ("/proc/self/exe"), buf=0xff08dd70, bufsiz=0x1000 ) -> e
+[main] [SYSCALL] brk ( addr=0x90021da0 ) -> 90021da0
+[main] [SYSCALL] brk ( addr=0x90022000 ) -> 90022000
+[main] [SYSCALL] mprotect ( addr=0x80dc000, len=0x1000, prot=READ ) -> 0
+[main] [SYSCALL] time ( tloc=0x0 ) -> 5c545ef0
+[main] [SYSCALL] stat64 ( pathname=0xff08ef26 ("/home/admin/zelos_dir/i686-buildroot-2020.08.3-glibc"), statbuf=0xff08ec30 ) -> 0
+[main] [SYSCALL] write ( fd=0x2 (stderr), buf=0xff08c7b0 ("Failed to stat file /home/admin/zelos_dir/i686-buildroot-2020.08.3-glibc: Value too large for defined data type\n"), count=0x70 ) -> 70
+[main] [SYSCALL] openat ( dirfd=0xffffff9c, pathname=0xff08ef26 ("/home/admin/zelos_dir/i686-buildroot-2020.08.3-glibc"), flags=0x0 ) -> 10
+[main] [SYSCALL] read ( fd=0x10 (file), buf=0x90001040, count=0x40 ) -> 40
+[main] [SYSCALL] close ( fd=0x10 (file) ) -> 0
+[main] [SYSCALL] openat ( dirfd=0xffffff9c, pathname=0xff08ef26 ("/home/admin/zelos_dir/i686-buildroot-2020.08.3-glibc"), flags=0x0 ) -> 14
+[main] [SYSCALL] mmap2 ( addr=0x0, length=0xffffffff, prot=RW, flags=0x2, fd=0x14 (file), pgoffset=0x0 ) -> -1
+[main] [SYSCALL] exit_group ( status=0x1 ) -> void

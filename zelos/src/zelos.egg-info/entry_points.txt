@@ -1,0 +1,3 @@
+[console_scripts]
+zelos = zelos.__main__:main
+

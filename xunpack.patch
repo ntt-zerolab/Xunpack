@@ -1,0 +1,2731 @@
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/accel/tcg/plugin-gen.c qemu/accel/tcg/plugin-gen.c
+--- ../raid_public/qemu-orig/accel/tcg/plugin-gen.c	2023-09-22 12:54:30.332746882 +0900
++++ qemu/accel/tcg/plugin-gen.c	2023-10-02 11:16:47.726094184 +0900
+@@ -766,7 +766,11 @@ static void plugin_inject_cb(const struc
+ }
+ 
+ /* #define DEBUG_PLUGIN_GEN_OPS */
++#ifdef CONFIG_XUNPACK
++static void pr_ops(uint32_t dump_index)
++#else
+ static void pr_ops(void)
++#endif
+ {
+ #ifdef DEBUG_PLUGIN_GEN_OPS
+     TCGOp *op;
+@@ -823,8 +827,13 @@ static void plugin_gen_inject(const stru
+ {
+     TCGOp *op;
+     int insn_idx;
++#ifdef CONFIG_XUNPACK
++    uint32_t dump_idx=0;
+ 
++    pr_ops(dump_idx);
++#else
+     pr_ops();
++#endif
+     insn_idx = -1;
+     QSIMPLEQ_FOREACH(op, &tcg_ctx->plugin_ops, plugin_link) {
+         enum plugin_gen_from from = op->args[0];
+@@ -837,8 +846,20 @@ static void plugin_gen_inject(const stru
+             insn_idx++;
+         }
+         plugin_inject_cb(plugin_tb, op, insn_idx);
++
++#ifdef CONFIG_XUNPACK
++        dump_idx++;
++    //    pr_ops(dump_idx);
++#endif
++
+     }
++
++#ifdef CONFIG_XUNPACK
++    dump_idx++;
++    pr_ops(dump_idx);
++#else
+     pr_ops();
++#endif
+ }
+ 
+ bool plugin_gen_tb_start(CPUState *cpu, const TranslationBlock *tb, bool mem_only)
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/accel/tcg/translate-all.c qemu/accel/tcg/translate-all.c
+--- ../raid_public/qemu-orig/accel/tcg/translate-all.c	2023-09-22 12:54:30.332746882 +0900
++++ qemu/accel/tcg/translate-all.c	2023-10-02 11:21:47.201632038 +0900
+@@ -62,6 +62,8 @@
+ #include "hw/core/tcg-cpu-ops.h"
+ #include "internal.h"
+ 
++#include <stdint.h>
++
+ /* #define DEBUG_TB_INVALIDATE */
+ /* #define DEBUG_TB_FLUSH */
+ /* make various TB consistency checks */
+@@ -2576,7 +2578,7 @@ void dump_opcount_info(void)
+     tcg_dump_op_count();
+ }
+ 
+-#else /* CONFIG_USER_ONLY */
++#else /* ifndef CONFIG_USER_ONLY */
+ 
+ void cpu_interrupt(CPUState *cpu, int mask)
+ {
+@@ -2688,6 +2690,92 @@ static int dump_region(void *priv, targe
+     return 0;
+ }
+ 
++#ifdef CONFIG_XUNPACK
++typedef struct PageDump
++{
++    void *cpu;
++    char *dir;
++}PageDump;
++
++static int fdump_region(void *args, target_ulong start,
++    target_ulong end, unsigned long prot)
++{
++    const char *dir = ((PageDump*)args)->dir;
++    uint64_t size = end - start;
++
++    CPUState *env = qemu_get_cpu(0);
++    if(env == NULL){
++        fprintf(stderr, "qemu_get_cpu(0) failed\n");
++        return -1;
++    }
++
++    char fn[1024];
++    snprintf(fn, sizeof(fn), "%s/%016lx-%016lx.raw", dir, (uint64_t)start, (uint64_t)end);
++
++    FILE *fd = fopen(fn, "wb");
++    if(!fd){
++        fprintf(stderr, "fopen failed. fn=%s\n", fn);
++        return -1;
++    }
++
++    uint8_t buf[4096];
++    uint32_t l;
++    uint64_t written = 0;
++
++#if 0
++    FILE *logfile = qemu_log_lock();
++    if (logfile) {
++        qemu_log("++page layout changed following\n");
++        page_dump(logfile);
++    }
++    qemu_log_unlock(logfile);
++#endif
++
++    while(size != 0){
++
++        l = sizeof(buf);
++        if(l > size)
++            l = size;
++
++        if(cpu_memory_rw_debug(env, start, buf, l, false) != 0){
++            goto exit;
++        }
++
++        if(fwrite(buf, 1, l, fd) != l){
++            fprintf(stderr, "fwrite failed\n");
++            goto exit;
++        }
++
++        start += l;
++        size  -= l;
++        written += l;
++    }
++
++exit:
++
++    if(fd){
++        fclose(fd);
++        fd = NULL;
++    }
++
++    if(written == 0){
++        unlink(fn);
++    }
++
++    return 0;
++}
++
++
++void page_fdump(void* cpu, char* dir)
++{
++    PageDump args;
++    args.cpu = cpu;
++    args.dir = dir;
++
++    walk_memory_regions(&args, fdump_region);
++}
++#endif 
++
+ /* dump memory mappings */
+ void page_dump(FILE *f)
+ {
+@@ -2900,7 +2988,7 @@ int page_unprotect(target_ulong address,
+     mmap_unlock();
+     return 0;
+ }
+-#endif /* CONFIG_USER_ONLY */
++#endif /* ifndef CONFIG_USER_ONLY */
+ 
+ /* This is a wrapper for common code that can not use CONFIG_SOFTMMU */
+ void tcg_flush_softmmu_tlb(CPUState *cs)
+@@ -2909,3 +2997,38 @@ void tcg_flush_softmmu_tlb(CPUState *cs)
+     tlb_flush(cs);
+ #endif
+ }
++
++
++#ifdef CONFIG_DEBUG_TCG
++
++#ifdef CONFIG_XUNPACK
++void dump_tcg_regs(void* env_ptr)
++{
++#ifdef CONFIG_USER_ONLY
++    dump_regs(tcg_ctx, env_ptr);
++#else
++    dump_regs(tcg_ctx, env_ptr);
++#endif
++}
++
++int find_tcg_reg(void* env_ptr, uint64_t value, uint64_t* out, uint64_t* base, uint64_t* count)
++{
++#ifdef CONFIG_USER_ONLY
++    return find_reg(tcg_ctx, env_ptr, value, out, base, count);
++#else
++    return find_reg(tcg_ctx, env_ptr, value, out, base, count);
++#endif
++}
++
++int get_tcg_reg(void* env_ptr, uint64_t* value, uint64_t base_offset, uint64_t offset)
++{
++#ifdef CONFIG_USER_ONLY
++    return get_reg(tcg_ctx, env_ptr, value, base_offset, offset);
++#else
++    return get_reg(tcg_ctx, env_ptr, value, base_offset, offset);
++#endif
++}
++
++#endif //CONFIG_XUNPACK
++
++#endif //CONFIG_DEBUG_TCG
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/configure qemu/configure
+--- ../raid_public/qemu-orig/configure	2023-09-22 12:54:30.344748117 +0900
++++ qemu/configure	2023-09-22 14:35:18.121172191 +0900
+@@ -452,6 +452,7 @@ debug_mutex="no"
+ libpmem="$default_feature"
+ default_devices="true"
+ plugins="no"
++xunpack="no"
+ fuzzing="no"
+ rng_none="no"
+ secret_keyring="$default_feature"
+@@ -1526,6 +1527,10 @@ for opt do
+   ;;
+   --disable-plugins) plugins="no"
+   ;;
++  --enable-xunpack) xunpack="yes"
++  ;;
++  --disable-xunpack) xunpack="no"
++  ;;
+   --enable-containers) use_containers="yes"
+   ;;
+   --disable-containers) use_containers="no"
+@@ -1793,6 +1798,8 @@ Advanced options (experts only):
+                            track the maximum stack usage of stacks created by qemu_alloc_stack
+   --enable-plugins
+                            enable plugins via shared library loading
++  --enable-xunpack
++                           enable Xunpack functions (extended TCG Plugin I/F)
+   --disable-containers     don't use containers for cross-building
+   --gdb=GDB-path           gdb to use for gdbstub tests [$gdb_bin]
+ 
+@@ -6126,6 +6133,10 @@ if test "$fuzzing" = "yes" ; then
+   fi
+ fi
+ 
++if test "$xunpack" = "yes" ; then
++    echo "CONFIG_XUNPACK=y" >> $config_host_mak
++fi
++
+ if test "$plugins" = "yes" ; then
+     echo "CONFIG_PLUGIN=y" >> $config_host_mak
+     # Copy the export object list to the build dir
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/contrib/plugins/Makefile qemu/contrib/plugins/Makefile
+--- ../raid_public/qemu-orig/contrib/plugins/Makefile	2023-09-22 12:54:30.344748117 +0900
++++ qemu/contrib/plugins/Makefile	2023-10-02 12:09:55.819642460 +0900
+@@ -13,11 +13,9 @@ include $(BUILD_DIR)/config-host.mak
+ VPATH += $(SRC_PATH)/contrib/plugins
+ 
+ NAMES :=
+-NAMES += hotblocks
+-NAMES += hotpages
+-NAMES += howvec
+-NAMES += lockstep
+-NAMES += hwprofile
++NAMES += xunpack32
++NAMES += xunpack64
++NAMES += uunpack
+ 
+ SONAMES := $(addsuffix .so,$(addprefix lib,$(NAMES)))
+ 
+@@ -26,18 +24,34 @@ SONAMES := $(addsuffix .so,$(addprefix l
+ CFLAGS = $(GLIB_CFLAGS)
+ CFLAGS += -fPIC
+ CFLAGS += $(if $(findstring no-psabi,$(QEMU_CFLAGS)),-Wpsabi)
+-CFLAGS += -I$(SRC_PATH)/include/qemu
++CFLAGS += -I$(SRC_PATH)/include/qemu -I/$(SRC_PATH)/include 
++CFLAGS += -DCONFIG_XUNPACK
++#CFLAGS += -g
++#CFLAGS += -fsanitize=address
++#CFLAGS += -lasan
+ 
+ all: $(SONAMES)
+ 
++xunpack32.o: xunpack.c
++	$(CC) $(CFLAGS) -DTARGET_LONG_SIZE=4 -c -o xunpack32.o $<
++
++xunpack64.o: xunpack.c
++	$(CC) $(CFLAGS) -DTARGET_LONG_SIZE=8 -c -o xunpack64.o $<
++
+ %.o: %.c
+ 	$(CC) $(CFLAGS) -c -o $@ $<
+ 
+ lib%.so: %.o
+ 	$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LDLIBS)
+ 
++libxunpack32.so: xunpack32.o 
++	$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LDLIBS)
++
++libxunpack64.so: xunpack64.o
++	$(CC) -shared -Wl,-soname,$@ -o $@ $^ $(LDLIBS)
++
+ clean:
+-	rm -f *.o *.so *.d
++	rm -f *.o *.so *.d *.s *.i
+ 	rm -Rf .libs
+ 
+ .PHONY: all clean
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/contrib/plugins/uunpack.c qemu/contrib/plugins/uunpack.c
+--- ../raid_public/qemu-orig/contrib/plugins/uunpack.c	1970-01-01 09:00:00.000000000 +0900
++++ qemu/contrib/plugins/uunpack.c	2023-09-21 11:20:31.481918906 +0900
+@@ -0,0 +1,210 @@
++/*
++ * Uunpack Plugin
++ */
++
++#include <glib.h>
++#include <inttypes.h>
++#include <unistd.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <stdio.h>
++#include <errno.h>
++#include <math.h>
++#include <sys/stat.h>
++
++#include <qemu-plugin.h>
++
++QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
++
++/* saved so we can uninstall later */
++static qemu_plugin_id_t our_id;
++
++static GMutex lock;
++/* Shadow Memory Index: virtual address, Value: Layer */
++static GHashTable *sh_mem;
++
++static uint32_t g_max_layer = 0;
++static uint32_t g_curr_layer = 0;
++static bool verbose;
++static uint32_t g_dump_index = 0;
++
++static char uuid[128];
++
++static void inline qemu_plugin_log_printf(const char* fmt, ...)
++{
++    char buf[1024];
++    va_list ap;
++
++    va_start(ap, fmt);
++    vsnprintf(buf, sizeof(buf), fmt, ap);
++    va_end(ap);
++
++    g_autofree gchar* out = g_strdup_printf(buf);
++    qemu_plugin_outs(out);
++}
++
++static void plugin_init(void)
++{
++    sh_mem = g_hash_table_new(g_direct_hash, g_direct_equal);
++}
++
++static void plugin_cleanup(qemu_plugin_id_t id)
++{
++}
++
++static void plugin_exit(qemu_plugin_id_t id, void *p)
++{
++    plugin_cleanup(id);
++}
++
++static void vcpu_mem_handler(unsigned int cpu_index, qemu_plugin_meminfo_t meminfo,
++                       uint64_t vaddr, void *udata)
++{
++    bool is_write = qemu_plugin_mem_is_store(meminfo);
++    if(!is_write){
++        return;
++    }
++
++    uint64_t instr_addr = (uint64_t)udata;
++    uint64_t base = vaddr - instr_addr;
++    uint32_t size = (uint32_t)pow(2.0, qemu_plugin_mem_size_shift(meminfo));
++
++    if(is_write){
++        g_mutex_lock(&lock);
++
++        uint8_t layer = (uint8_t)g_hash_table_lookup(sh_mem, (gpointer)instr_addr);
++
++        for(uint32_t i=0; i<size; i++){
++            if(layer == 0){
++                g_hash_table_insert(sh_mem, (gpointer)(vaddr + i), (gpointer)1);
++            }else{
++                g_hash_table_insert(sh_mem, (gpointer)(vaddr + i), (gpointer)(layer+1));
++            }
++        }
++
++        uint32_t value = 0;
++        qemu_plugin_memory_rw(vaddr, &value, size, false);
++
++        g_mutex_unlock(&lock);
++
++//        qemu_plugin_log_printf("[w] i_vaddr:%d:%016lx: size:%d w_vaddr:%016lx value=%08x\n", 
++//                layer, instr_addr, size, vaddr, value);
++    }else{
++        uint8_t layer = -1;
++
++        uint32_t value = 0;
++        qemu_plugin_memory_rw(vaddr, &value, size, false);
++
++//        qemu_plugin_log_printf("[r] i_vaddr:%d:%016lx: size:%d r_vaddr:%016lx value=%08x\n", 
++//                layer, instr_addr, size, vaddr, value);
++    }
++}
++
++static enum qemu_plugin_mem_rw rw = QEMU_PLUGIN_MEM_RW;
++
++#if 0
++void print_hash (gpointer key, gpointer value, gpointer user_data);
++void print_hash (gpointer key, gpointer value, gpointer user_data)
++{
++    printf("key:%016lx value:%016x\n", (uint64_t)key, (uint8_t)value);
++}
++#endif
++
++static void dump_pages(uint32_t cpu_index)
++{
++    char fullpath[512];
++    char dirpath[256];
++
++    snprintf(dirpath, sizeof(dirpath), "/tmp/dump/%s", uuid);
++    snprintf(fullpath, sizeof(fullpath), "%s/%08x", dirpath, g_dump_index);
++
++    mkdir("/tmp/dump", 0777);
++    mkdir(dirpath, 0777);
++    mkdir(fullpath, 0777);
++
++    //the 3rd argument is not used.
++    qemu_plugin_dump_pages(fullpath, cpu_index, (uint64_t)-1);
++
++    g_dump_index++;
++}
++
++static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
++{
++    uint64_t tb_vaddr = (uint64_t) udata;
++    uint64_t tmp = 0;
++
++    uint8_t layer = (uint8_t)g_hash_table_lookup(sh_mem, (gpointer)tb_vaddr);
++
++    if(layer){
++        if(layer != g_curr_layer){
++            qemu_plugin_log_printf("Found the change of layers: from %d to %d cpu_index=%d\n", g_curr_layer, layer, cpu_index);
++            g_curr_layer = layer;
++
++            dump_pages(cpu_index);
++        }
++    }else{
++        if(g_curr_layer != 0){
++            qemu_plugin_log_printf("Found the change of layers: from %d to %d cpu_index=%d\n", g_curr_layer, layer, cpu_index);
++
++            g_curr_layer = layer;
++            dump_pages(cpu_index);
++        }
++    }
++}
++
++static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
++{
++    size_t n = qemu_plugin_tb_n_insns(tb);
++    size_t i;
++
++    //register memory callbacks
++    uint64_t tb_vaddr = 0;
++
++    for (i = 0; i < n; i++) {
++        struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
++
++        gpointer udata = (gpointer) qemu_plugin_insn_vaddr(insn);
++
++        qemu_plugin_log_printf("@%016lx: %s\n", 
++                                (uint64_t)udata, 
++                                qemu_plugin_insn_disas(insn));
++
++        if(i == 0){
++            tb_vaddr = (uint64_t)udata;
++        }
++
++        qemu_plugin_register_vcpu_mem_cb(insn, vcpu_mem_handler,
++                                         QEMU_PLUGIN_CB_NO_REGS,
++                                         rw, udata);
++    }
++
++    //register tb_exec callbacks
++    qemu_plugin_register_vcpu_tb_exec_cb(tb, vcpu_tb_exec,
++                                         QEMU_PLUGIN_CB_NO_REGS, (void *)tb_vaddr);
++}
++
++QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
++                                           const qemu_info_t *info,
++                                           int argc, char **argv)
++{
++    int i;
++
++    for (i = 0; i < argc; i++) {
++        char *p = argv[i];
++        if (strncmp(p, "uuid:", 5) == 0) {
++            strncpy(uuid, (const char*)&p[5], 36);
++            uuid[36] = '\0';
++            qemu_plugin_log_printf("uuid:%s\n", uuid);
++        } 
++    }
++
++    our_id = id;
++
++    plugin_init();
++
++    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
++
++    qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
++
++    return 0;
++}
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/contrib/plugins/xunpack.c qemu/contrib/plugins/xunpack.c
+--- ../raid_public/qemu-orig/contrib/plugins/xunpack.c	1970-01-01 09:00:00.000000000 +0900
++++ qemu/contrib/plugins/xunpack.c	2023-09-21 11:38:57.047410279 +0900
+@@ -0,0 +1,1534 @@
++/*
++ * Xunpack Plugin
++ */
++
++#include <glib.h>
++#include <inttypes.h>
++#include <unistd.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <stdio.h>
++#include <errno.h>
++#include <math.h>
++#include <sys/stat.h>
++#include <assert.h>
++#include <stdarg.h>
++
++#include <qemu-plugin.h>
++
++//////////////////////////////////
++// Config
++#define WRITE_EXEC
++#define WRITE_SYSCALL
++#define DEBUG
++
++//#define TARGET_LONG_SIZE 4
++//#define TARGET_LONG_SIZE 8
++
++//#define ARCH_X86
++//#define ARCH_ARM
++//#define ARCH_MIPS
++//#define ARCH_PPC
++//#define ARCH_SPARC
++//#define ARCH_SPARC64
++
++//////////////////////////////////
++
++#if TARGET_LONG_SIZE == 4
++typedef int32_t target_long;
++typedef uint32_t target_ulong;
++#define TARGET_FMT_lx "%08x"
++#define TARGET_FMT_ld "%d"
++#define TARGET_FMT_lu "%u"
++#define TARGET_PAGE_BITS 12
++#define CPU_NB_REGS 8
++
++#elif TARGET_LONG_SIZE == 8
++typedef int64_t target_long;
++typedef uint64_t target_ulong;
++#define TARGET_FMT_lx "%016" PRIx64
++#define TARGET_FMT_ld "%" PRId64
++#define TARGET_FMT_lu "%" PRIu64
++//#define TARGET_PAGE_BITS 13
++#define TARGET_PAGE_BITS 12
++#define CPU_NB_REGS 16
++
++#else
++#error TARGET_LONG_SIZE undefined
++#endif
++
++#define TARGET_PAGE_MASK   ((target_long)-1 << TARGET_PAGE_BITS)
++
++#if defined(ARCH_X86)
++#include "arch/cpu_x86.h"
++#elif defined(ARCH_ARM)
++#include "arch/cpu_arm.h"
++#elif defined(ARCH_MIPS)
++#include "arch/cpu_mips.h"
++#elif defined(ARCH_PPC)
++#include "arch/cpu_ppc.h"
++#elif defined(ARCH_SPARC) || defined(ARCH_SPARC64)
++#include "arch/cpu_sparc.h"
++#endif
++
++#define TARGET_PAGE_SIZE   (1 << TARGET_PAGE_BITS)
++#ifndef ROUND_UP
++#define ROUND_UP(n, d) (((n) + (d) - 1) & -(0 ? (n) : (d)))
++#endif
++#define TARGET_PAGE_ALIGN(addr) ROUND_UP((addr), TARGET_PAGE_SIZE)
++
++QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
++
++/* saved so we can uninstall later */
++static qemu_plugin_id_t our_id;
++
++/* flag for capturing memory access logs */
++int g_memlog_enabled = false;
++
++static GMutex lock;
++//static uint8_t *sh_mem;
++
++/*
++    Shadow memory is indexed with raw_offset, not physical address.
++*/
++static uint8_t *sh_mem_map   = NULL;
++static uint32_t sh_mem_map_size = 0;
++
++/*
++    The key of `v2p_map` is vfn (virtual frame number).
++    The value of it is `TLBEntry`, which contains the list of 
++    pfn. `bitmap` of a TLBEntry manages the availability of the slots 
++    of the list. 
++*/
++static GHashTable *v2p_map = NULL;
++
++/*
++    dirty_page_map is indexed with the PFN of raw_offset.
++*/
++#if 0
++static GHashTable *dirty_page_map = NULL;
++#else
++static uint8_t *dirty_page_map = NULL;
++static uint32_t dirty_page_map_size = 0;
++#endif
++
++//TLB cache
++typedef struct _TLBEntry {
++    /* A TLBEntry can hold at most 8 pfns, managed by `bitmap` */
++    uint64_t bitmap;
++    target_ulong pfn[64];
++    target_ulong vfn;
++} TLBEntry;
++
++#define DIRTY_PAGE      1
++#define NON_DIRTY_PAGE  0
++
++typedef struct _DirtyPage {
++    uint8_t dirty_flag;
++    uint64_t rva; // reverse virtual page
++} DirtyPage;
++
++static uint32_t g_curr_layer    = 0;
++static uint32_t g_dump_index    = 0;
++static target_ulong g_prev_va   = 0; //virtual
++static target_ulong g_prev_pa   = 0; //physical 
++static bool is_system           = false;
++static bool g_is_started        = false;
++static target_ulong g_ramsize   = 0;
++static target_ulong g_start_addr = 0;
++static target_ulong g_base_addr = 0;
++static uint32_t g_start_bytes   = 0;
++static GHashTable *g_target_mem_range = NULL;
++static target_ulong g_user_limit = 0;
++static target_ulong g_user_base = (target_ulong)-1;
++static bool g_is_from_kernel = false;
++RamRanges g_ram_ranges = {};
++static target_ulong g_dump_limit = 0;
++
++static gint comp(gconstpointer a, gconstpointer b);
++static gint comp_reverse(gconstpointer a, gconstpointer b);
++
++static char uuid[36];
++
++static void dump_range_map(GHashTable* map);
++static bool tlb_dump(target_ulong start, target_ulong limit, const char* full_dirpath);
++
++static void qemu_plugin_log_printf(const char* fmt, ...)
++{
++    char buf[1024];
++    va_list ap;
++
++    va_start(ap, fmt);
++    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
++    va_end(ap);
++
++    assert(n < sizeof(buf));
++    qemu_plugin_outs(buf);
++}
++
++#define qemu_plugin_log_err(FMT, ...)             \
++    do {\
++        qemu_plugin_log_printf("%s:%d " FMT, __FUNCTION__, __LINE__, ## __VA_ARGS__);    \
++    }while(0)
++
++#if TARGET_LONG_SIZE == 8
++//x86_64    ffffffff81000000 -> ffffffff80000000
++//aarch64   ffffffc010000000 -> ffffffc000000000
++//mips64    ffffffff80100000 -> ffffffff80000000
++//ppc64     c000000000008000 -> c000000000000000
++//riscv64   ffffffe000002000 -> ffffffe000000000
++//sparc64   0000000000404000 -> 0000000000400000
++
++static uint64_t calc_mask_bits(uint64_t addr)
++{
++    uint32_t bits = 0; 
++    uint32_t skip = 0; 
++    bool is_start = false;
++
++    for(uint8_t i=63;i!=0;i--){
++        if((addr >> i) & 0x1){
++             bits++;
++             is_start = true;
++        }else{
++            if(is_start) 
++                break;
++            skip++;
++        }
++    }
++
++    uint64_t mask = -1;
++    if(skip){
++        mask = mask << skip;
++        mask = mask >> skip;
++    }
++
++    mask = mask >> (64 - (bits+skip));
++    mask = mask << (64 - (bits+skip));
++
++    return mask;
++}
++#endif //#if TARGET_LONG_SIZE == 8
++
++static void set_user_limit(target_ulong kernel_base)
++{
++#if TARGET_LONG_SIZE == 4
++    //based on VMSPLIT configuration
++    if(kernel_base >= 0xc0000000){
++        g_user_limit = 0xc0000000;
++    }else if((kernel_base < 0xc0000000) 
++        && (kernel_base >= 0xb0000000)){
++        g_user_limit = 0xb0000000;
++    }else if((kernel_base < 0xb0000000) 
++        && (kernel_base >= 0x80000000)){
++        g_user_limit = 0x80000000;
++    }else if(kernel_base < 0x80000000){
++        g_user_limit = 0x40000000;
++    }
++#elif TARGET_LONG_SIZE == 8
++    g_user_limit = calc_mask_bits(kernel_base);
++#endif
++}
++
++static inline bool is_userland(target_ulong va)
++{
++#if TARGET_LONG_SIZE == 4
++    return ((va < g_user_limit) && (va >= g_user_base));
++#elif TARGET_LONG_SIZE == 8
++    if((int64_t)va < 0){
++        return false;
++    }else{
++        if((int64_t)g_user_limit < 0){
++            return ((va < g_user_limit) && (va >= g_user_base));
++        }else{
++            return ((va < g_user_limit) && (va >= g_user_base));
++        }
++    }
++#endif
++}
++
++void free_v2p_entry(gpointer val);
++
++static void plugin_init(void)
++{
++    g_ramsize = qemu_plugin_get_ram_size();
++
++#ifdef DEBUG
++    qemu_plugin_log_printf("ramsize:%016lx"
++                            " sizeof(target_ulong)=%d"
++                            " sizeof(target_ulong)=%d"
++                            " sizeof(hwaddr)=%d\n", 
++                            g_ramsize, sizeof(target_ulong), 
++                            sizeof(target_ulong), sizeof(hwaddr)); 
++#endif
++
++    /* Shadow Memory being managed by each memory view */
++    sh_mem_map_size = g_ramsize;
++    sh_mem_map = (uint8_t*)calloc(sh_mem_map_size, sizeof(uint8_t));
++
++    /* TLB mapping table */
++    v2p_map = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, free_v2p_entry);
++
++    /* Physical-based Dirty Map */
++    dirty_page_map_size = g_ramsize >> 12;
++    dirty_page_map = (uint8_t*)calloc(dirty_page_map_size, sizeof(uint8_t));
++
++    return;
++}
++
++struct tlb_dump_args
++{
++    char* fullpath;
++    char* prefix;
++};
++
++static void map_tlb_dump(gpointer key, gpointer val, gpointer user_data)
++{
++    target_ulong start = (target_ulong)key;
++    target_ulong size = (target_ulong)val;
++    struct tlb_dump_args *args = (struct tlb_dump_args*)user_data;
++
++    qemu_plugin_log_printf("map_tlb_dump: start:%016lx end:%016lx fullpath:%s prefix:%s\n", 
++                            start, 
++                            start + size,
++                            args->fullpath, 
++                            args->prefix);
++
++    tlb_dump(start, start + size, args->fullpath);
++}
++
++//static void free_v2p_entry(gpointer key, gpointer val, gpointer user_data)
++void free_v2p_entry(gpointer val)
++{
++    TLBEntry *ent = (TLBEntry *)val;
++    if(ent){
++        free(ent);
++        ent = NULL;
++    }
++}
++
++//va is just a for debugging
++static bool set_dirty_page(target_ulong pa, uint8_t flag, target_ulong va)
++{
++    //qemu_plugin_log_printf("set_dirty_page: va %016lx pa %016lx flag %d\n", va, pa, flag);
++
++    for(int i=0;i<g_ram_ranges.n_rr;i++){
++        if(pa >= g_ram_ranges.rr[i].view_addr && 
++            pa < g_ram_ranges.rr[i].view_addr + g_ram_ranges.rr[i].size)
++        {
++            target_ulong view_addr = g_ram_ranges.rr[i].view_addr;
++            target_ulong offset_in_region = g_ram_ranges.rr[i].offset_in_region;
++
++            target_ulong offset = pa - view_addr + offset_in_region;
++            offset >>= 12;
++
++            assert(offset < dirty_page_map_size);
++            dirty_page_map[offset] = flag;
++
++            return true;
++        }
++    }
++
++    //when writing to Non-RAM memory. 
++    return false; 
++}
++
++static int get_dirty_page(target_ulong pa)
++{
++    for(int i=0;i<g_ram_ranges.n_rr;i++){
++        if(pa >= g_ram_ranges.rr[i].view_addr && 
++            pa < g_ram_ranges.rr[i].view_addr + g_ram_ranges.rr[i].size)
++        {
++            target_ulong view_addr = g_ram_ranges.rr[i].view_addr;
++            target_ulong offset_in_region = g_ram_ranges.rr[i].offset_in_region;
++
++            target_ulong offset = pa - view_addr + offset_in_region;
++            offset >>= 12;
++
++            assert(offset < dirty_page_map_size);
++            return dirty_page_map[offset];
++        }
++    }
++
++    //when reading from Non-RAM memory. 
++    return 0xff; 
++}
++
++//Return `false` means that it newly created or registered an entry.
++static bool insert_v2p(uint64_t va, uint64_t pa)
++{
++    target_ulong pfn =  (pa & TARGET_PAGE_MASK);
++    target_ulong vfn =  (va & TARGET_PAGE_MASK);
++
++#if 0
++    qemu_plugin_log_printf("%s vfn %016lx pfn %016lx\n", __FUNCTION__, vfn, pfn);
++#endif
++
++    TLBEntry *ent = (TLBEntry *) g_hash_table_lookup(v2p_map, (gpointer)vfn);
++
++    if(ent == NULL){
++
++        //TLBEntry *new = calloc(1, sizeof(TLBEntry));
++        TLBEntry *new = malloc(sizeof(TLBEntry));
++
++        new->vfn = vfn;
++        new->pfn[0] = pfn;
++        new->bitmap = 1;
++
++        g_hash_table_insert(v2p_map, (gpointer)vfn, (gpointer)new);
++
++        return false;
++
++    }else{
++
++        //check bitmap
++        for(int i=0;i<sizeof(uint64_t)*8;i++){
++            if((ent->bitmap >> i) & 0x1){
++                if(ent->pfn[i] == pfn){
++                    return true; //Already registered
++                }
++            }
++        }
++
++        // not found, then, newly register it.
++        for(int i=0;i<sizeof(uint64_t)*8;i++){
++            if(!(ent->bitmap >> i) & 0x1){
++                ent->pfn[i] = pfn;
++                ent->bitmap |= (1 << i);
++                return false;
++            }
++        }
++    }
++
++    // When you rearch here, there is no space in `bitmap`. 
++    // So, our workaround for managing `bitmap` is FIFO. 
++
++    for(int i=sizeof(uint64_t)*8-1;i!=0;i--){
++        ent->pfn[i-1] = ent->pfn[i];
++    }
++
++    ent->bitmap &= ~(1 << 63);
++
++    if((ent->bitmap >> 63) & 0x1){
++        ent->pfn[63] = pfn;
++        ent->bitmap |= (1 << 63);
++        return false;
++    }else{
++        qemu_plugin_log_printf("should not rearch here");
++        assert(false);
++    }
++
++    //Should not reach here.
++
++    //debug
++    qemu_plugin_log_printf("env->bitmap=%016lx va=%016lx\n", ent->bitmap, va);
++    assert(false);
++}
++
++static inline bool set_sh_mem_map(target_ulong pa, uint8_t v)
++{
++    for(int i=0;i<g_ram_ranges.n_rr;i++){
++        if(pa >= g_ram_ranges.rr[i].view_addr && 
++            pa < g_ram_ranges.rr[i].view_addr + g_ram_ranges.rr[i].size)
++        {
++            target_ulong view_addr = g_ram_ranges.rr[i].view_addr;
++            target_ulong offset_in_region = g_ram_ranges.rr[i].offset_in_region;
++
++            target_ulong offset = pa - view_addr + offset_in_region;
++
++            assert(offset < sh_mem_map_size);
++            sh_mem_map[offset] = v;
++
++            return true;
++        }
++    }
++
++    return false;
++}
++
++static inline uint8_t get_sh_mem_map(target_ulong pa)
++{
++    for(int i=0;i<g_ram_ranges.n_rr;i++){
++        if(pa >= g_ram_ranges.rr[i].view_addr && 
++            pa < g_ram_ranges.rr[i].view_addr + g_ram_ranges.rr[i].size)
++        {
++            target_ulong view_addr = g_ram_ranges.rr[i].view_addr;
++            target_ulong offset_in_region = g_ram_ranges.rr[i].offset_in_region;
++            target_ulong offset = pa - view_addr + offset_in_region;
++
++            assert(offset < sh_mem_map_size);
++            return sh_mem_map[offset];
++        }
++    }
++
++    return 0xff;
++}
++
++static inline bool accessible(target_ulong pa, bool is_print)
++{
++    if(is_print){
++        qemu_plugin_log_printf("n_rr=%d\n", g_ram_ranges.n_rr);
++    }
++
++    for(int i=0;i<g_ram_ranges.n_rr;i++){
++        if(is_print){
++            qemu_plugin_log_printf("rr: %016lx - %016lx pa=%016lx\n",
++                                g_ram_ranges.rr[i].view_addr,
++                                g_ram_ranges.rr[i].view_addr+g_ram_ranges.rr[i].size,
++                                pa);
++        }
++
++        if(pa >= g_ram_ranges.rr[i].view_addr && 
++            pa < (g_ram_ranges.rr[i].view_addr + g_ram_ranges.rr[i].size))
++        {
++            return true;
++        }
++    }
++
++    return false;
++}
++
++//Need to check with `accessible` before calling `pa2offet`
++static inline target_ulong pa2ram(target_ulong pa)
++{
++    for(int i=0;i<g_ram_ranges.n_rr;i++){
++        if(pa >= g_ram_ranges.rr[i].view_addr && 
++            pa < g_ram_ranges.rr[i].view_addr + g_ram_ranges.rr[i].size)
++        {
++            target_ulong view_addr = g_ram_ranges.rr[i].view_addr;
++            target_ulong offset_in_region = g_ram_ranges.rr[i].offset_in_region;
++
++            target_ulong offset = pa - view_addr + offset_in_region;
++            return offset;
++        }
++    }
++
++    //assert(false);
++    return -1; //dummy
++}
++
++static int get_tag_pa(target_ulong pa, uint8_t *tag)
++{
++    if(!accessible(pa, false)){
++        return -2;
++    }
++
++    uint8_t t = get_sh_mem_map(pa);
++    *tag = (uint8_t)t;
++
++    return 0;
++}
++
++static int get_tag(target_ulong va, uint8_t *tag)
++{
++    target_ulong pa = qemu_plugin_v2p(va);
++
++    if(pa == -1){
++        return -1;
++    }
++
++    return get_tag_pa(pa, tag);
++}
++
++static void plugin_cleanup(qemu_plugin_id_t id)
++{
++
++    if(sh_mem_map){
++        free(sh_mem_map);
++        sh_mem_map = NULL;
++    }
++
++    sh_mem_map_size = 0;
++
++    if(v2p_map){
++        //g_hash_table_foreach(v2p_map, free_v2p_entry, NULL);
++        g_hash_table_destroy(v2p_map);
++        v2p_map = NULL;
++    }
++
++    if(dirty_page_map){
++        free(dirty_page_map);
++        dirty_page_map = NULL;
++    }
++
++    dirty_page_map_size = 0;
++}
++
++static void plugin_exit(qemu_plugin_id_t id, void *p)
++{
++    plugin_cleanup(id);
++}
++
++//This is for a debug purpose
++static target_ulong get_pid(uint32_t cpu_index)
++{
++    target_ulong cr3 = 0;
++#if defined(ARCH_X86)
++    CPUX86State* cpu_state = (CPUX86State*)qemu_plugin_cpu_state(cpu_index);
++    cr3 = cpu_state->cr[3];
++#elif defined(ARCH_ARM)
++    CPUARMState* cpu_state = (CPUARMState*)qemu_plugin_cpu_state(cpu_index);
++    cr3 = cpu_state->cp15.ttbr0_el[1]; //el: exception level, 1 = ns:non supervised
++#elif defined(ARCH_MIPS)
++    CPUMIPSState* cpu_state = (CPUMIPSState*)qemu_plugin_cpu_state(cpu_index);
++    cr3 = cpu_state->CP0_EntryHi & cpu_state->CP0_EntryHi_ASID_mask;
++#endif
++    return cr3;
++}
++
++#if 0
++static void check_header(gpointer key, gpointer value, gpointer user_data)
++{
++    uint8_t h[4];
++    target_ulong addr = (target_ulong) key;
++    target_ulong size = (target_ulong) value;
++
++    if(qemu_plugin_memory_rw(addr, h, 4, false) == 0){
++        if(h[0] == 'E' 
++            && h[1] == 'L' 
++            && h[2] == 'F')
++        {
++            uint8_t tag = 0;
++            if(get_tag(addr, &tag) != -1){
++                if(tag != 0xff && tag > 0){
++                    (*((int *)user_data)) = 1;
++                }
++            }
++        }
++    }
++
++    return;
++}
++#endif
++
++static int should_cached(void)
++{
++    uint8_t h[4] = {0, 0, 0, 0};
++
++    if(g_start_addr == 0)
++        return 0;
++
++    if(qemu_plugin_memory_rw(g_start_addr, h, 4, false) == 0){
++        uint8_t tag = 0;
++        if(get_tag(g_start_addr, &tag) == 0){
++            if(tag != 0xff && tag > 0){
++                return 1;
++            }
++        }
++    }
++
++    return 0;
++}
++
++#if defined(WRITE_EXEC) || defined(WRITE_SYSCALL)
++/*
++In memory callback, we should use `get_hwaddr` instead of `qemu_plugin_v2p`.
++`write_paddr` is essential but `instr_paddr` is not. 
++*/
++static void vcpu_mem_handler(unsigned int cpu_index, 
++                            qemu_plugin_meminfo_t meminfo,
++                            uint64_t vaddr, 
++                            void *instr_vaddr)
++{
++    // We do not care about memory writes in its initial stage.
++    if(!g_is_started){
++        return;
++    }
++
++    bool is_write = qemu_plugin_mem_is_store(meminfo);
++    if(!is_write){
++        //We do not care read accesses 
++        goto END;
++    }
++
++    struct qemu_plugin_hwaddr *hwaddr = qemu_plugin_get_hwaddr(meminfo, vaddr);
++    if (!hwaddr || qemu_plugin_hwaddr_is_io(hwaddr)) {
++        //qemu_plugin_log_err("Unresolvable: vaddr %016lx\n", vaddr);
++        return;
++    }
++
++    uint64_t write_paddr = qemu_plugin_hwaddr_phys_addr(hwaddr);
++
++    uint64_t instr_paddr = 0;
++    struct qemu_plugin_hwaddr *instr_hwaddr = qemu_plugin_get_hwaddr(meminfo, instr_vaddr);
++    if (instr_hwaddr && !qemu_plugin_hwaddr_is_io(instr_hwaddr)) {
++        instr_paddr = qemu_plugin_hwaddr_phys_addr(instr_hwaddr);
++    }
++
++    //uint8_t w_layer = get_sh_mem_map(write_paddr);
++    //uint8_t i_layer = get_sh_mem_map(instr_paddr);
++
++    target_ulong cr3 = get_pid(cpu_index);
++
++    uint8_t layer = 0xff;
++
++    uint32_t size = (uint32_t)pow(2.0, qemu_plugin_mem_size_shift(meminfo));
++
++    g_mutex_lock(&lock);
++
++    if(accessible(instr_paddr, false)){
++        layer = get_sh_mem_map(instr_paddr);
++    }
++
++    for(uint8_t i=0; i<size; i++){
++        if(accessible(write_paddr+i, false)){
++            if(layer == 0xff){
++                set_sh_mem_map(write_paddr+i, 1);
++            }else{
++                set_sh_mem_map(write_paddr+i, layer+1);
++            }
++        }
++    }
++
++    g_mutex_unlock(&lock);
++
++    //mark dirty memory
++    set_dirty_page(write_paddr, DIRTY_PAGE, vaddr);
++
++    if(is_userland(vaddr)){
++        if(should_cached()){
++            insert_v2p(vaddr, write_paddr);
++        }
++    }
++
++END:
++
++    return;
++}
++#endif //#if defined(WRITE_EXEC) || defined(WRITE_SYSCALL)
++
++static enum qemu_plugin_mem_rw rw = QEMU_PLUGIN_MEM_RW;
++
++static void dump2file(void* buf, char* rootdir, 
++                target_ulong start, target_ulong size)
++{
++    struct stat st;
++
++    if(stat(rootdir, &st) != 0){
++        mkdir(rootdir, 0777);
++        g_dump_index++;
++    }
++
++    int n = snprintf(NULL, 0, "%s/%016lx-%016lx.raw", 
++                                    rootdir,
++                                    start,
++                                    start + size);
++    assert(n>=0);
++
++    char* full_path = malloc(n + 1);
++    if(full_path == NULL){
++        return;
++    }
++
++    snprintf(full_path, n+1, "%s/%016lx-%016lx.raw", 
++                                    rootdir,
++                                    start,
++                                    start + size);
++
++
++    FILE* fd = fopen(full_path, "wb");
++    if(fd == NULL){
++        fprintf(stderr, "fopen failed\n");
++        return;
++    }
++
++    fwrite(buf, sizeof(char), size, fd);
++
++    if(fd){
++        fclose(fd);
++        fd = NULL;
++    }
++
++    qemu_plugin_log_printf("dump2file %s\n", full_path);
++
++    if(full_path){
++        free(full_path);
++        full_path = NULL;
++    }
++}
++
++static int find_dump_range(target_ulong seg_start, 
++                            target_ulong seg_end, GHashTable* range_map)
++{
++    //`start_vfn` and `end_vfn` are the avoid range
++    target_ulong start_vfn = (seg_start & TARGET_PAGE_MASK);
++    target_ulong end_vfn   = (seg_end   & TARGET_PAGE_MASK); 
++
++    GList *keys = g_hash_table_get_keys(v2p_map);
++    GList *lst = g_list_sort(keys, (GCompareFunc)comp);
++
++    target_ulong range_start = (target_ulong)-1;
++    target_ulong range_size = 0;
++
++    for(GList *item = lst; item != NULL; item = g_list_next(item)){
++
++        target_ulong vfn = (target_ulong)(item->data);
++
++        if(vfn <= end_vfn || !is_userland(vfn)){
++            // we do not care this range
++            if(range_size != 0){
++                g_hash_table_insert(range_map, (gpointer)range_start, 
++                                    (gpointer)range_size);
++                range_size = 0;
++            }
++            continue;
++        }
++
++        if(vfn == range_start + range_size){
++            //continuous range
++            range_size += TARGET_PAGE_SIZE;
++        }else{
++            //a new range
++            if(range_size != 0){
++                g_hash_table_insert(range_map, (gpointer)range_start, 
++                                    (gpointer)range_size);
++            }
++
++            range_size = TARGET_PAGE_SIZE;
++            range_start = vfn;
++        }
++    }
++
++    dump_range_map(range_map);
++
++    return 0;
++}
++
++static target_ulong find_continuous_pfn(TLBEntry *ent, target_ulong prev_paddr)
++{
++    //invalid prev_paddr
++    if(prev_paddr == (target_ulong)-1){
++        return ent->pfn[0];
++    }
++
++    for(int i=0;i<8;i++){
++        if((ent->bitmap >> i & 0x1)){
++            if(ent->pfn[i] == (prev_paddr + 0x1000)){
++                //found the continuous paddr
++                return ent->pfn[i];
++            }
++        }
++    }
++
++    //return the newer one
++    for(int i=8; i!=0; i--){
++        if((ent->bitmap >> (i-1)) & 0x1){
++            return ent->pfn[(i-1)];    
++        }
++    }
++
++    //not found the addr
++    return ent->pfn[0];
++}
++
++static bool tlb_dump(target_ulong start, target_ulong limit, 
++                const char* full_dirpath)
++{
++    target_ulong vaddr = start;
++
++    while(vaddr < limit){
++
++        uint64_t cont_size = 0;
++
++        //calc the size of the continuous memory for dumping 
++        for(target_ulong va = vaddr; va < limit; va+= TARGET_PAGE_SIZE){
++
++            target_ulong paddr = qemu_plugin_v2p(va);
++            if(paddr == -1){
++                //qemu_plugin_log_printf("\tva %016lx not accessible by V2P\n", va);
++                goto exit_loop;
++            }else{
++                int8_t dirty_flag = get_dirty_page(paddr);
++
++                qemu_plugin_log_printf("\tva %016lx to pa %016lx by V2P [%d]\n", 
++                    va, paddr, dirty_flag);
++
++                switch(dirty_flag){
++                    case NON_DIRTY_PAGE:
++                        goto exit_loop;
++                    case DIRTY_PAGE:
++                        cont_size += TARGET_PAGE_SIZE;
++                        set_dirty_page(paddr, NON_DIRTY_PAGE, vaddr);
++                        break;
++                    default:
++                        assert(false);
++                }
++            }
++        }
++
++exit_loop:
++
++        if(cont_size == 0){
++            cont_size += TARGET_PAGE_SIZE;
++            vaddr += cont_size;
++            continue;
++        }
++
++        //At here, we can dump from vaddr to vaddr+cont_size
++        char *buf = malloc(cont_size);
++        if(buf == NULL){
++            return false;
++        }
++
++        qemu_plugin_memory_rw(vaddr, buf, cont_size, false);
++
++        //write the buf into to a file
++        qemu_plugin_log_printf("tlb_dump: %016lx - %016lx\n", 
++                                    vaddr, 
++                                    vaddr + cont_size);
++
++        dump2file(buf, full_dirpath, vaddr, cont_size);
++
++        if(buf){
++            free(buf);
++            buf = NULL;
++        }
++
++        cont_size += TARGET_PAGE_SIZE;
++        vaddr += cont_size;
++    }
++
++    return true;
++
++}
++
++static void tlb_dump_target_continuous_memory(const char* prefix)
++{
++    target_ulong min_addr = 0;
++    target_ulong max_addr = 0;
++
++    //create a dump dir
++    char dirpath[1024];
++
++    int n = snprintf(dirpath, sizeof(dirpath), "/tmp/dump/%s", uuid);
++    assert(n < sizeof(dirpath));
++
++    struct stat st;
++    if(stat(dirpath, &st) != 0){
++        mkdir(dirpath, 0777);
++    }
++
++    char full_dirpath[1024];
++    n = snprintf(full_dirpath, sizeof(full_dirpath), "%s/%s%08x", 
++                                            dirpath, prefix, g_dump_index);
++    assert(n < sizeof(full_dirpath));
++
++    // Segument range
++
++    // min
++    GList *keys = g_hash_table_get_keys(g_target_mem_range);
++    GList *lst = g_list_sort(keys, (GCompareFunc)comp);
++    GList *first = g_list_first(lst);
++    min_addr = (target_ulong)first->data;
++
++    // max
++    GList *values = g_hash_table_get_values(g_target_mem_range);
++    GList *l = g_list_sort(values, (GCompareFunc)comp_reverse);
++    GList *t = g_list_first(l);
++    max_addr = (target_ulong)t->data;
++
++    qemu_plugin_log_printf("tlb_dump_target_continuous: min:%016lx max:%016lx\n", 
++                            min_addr, max_addr);
++
++    tlb_dump(min_addr, max_addr, (const char*)full_dirpath);
++
++    // Written area except for the above range
++
++    //key = start_vaddr, value = size
++    GHashTable *range_map = g_hash_table_new(g_direct_hash, g_direct_equal);
++
++    find_dump_range(min_addr, max_addr, range_map);
++
++    struct tlb_dump_args dump_args;
++    dump_args.fullpath = full_dirpath;
++    dump_args.prefix = prefix;
++
++    g_hash_table_foreach(range_map, map_tlb_dump, &dump_args);
++    g_hash_table_destroy(range_map);
++
++}
++
++static void print_list_item(gpointer data, gpointer user_data)
++{
++    qemu_plugin_log_printf("%d: %016lx\n", 
++                                (*(gint*)user_data)++, 
++                                (unsigned long)data);
++}
++
++static void print_key_val(gpointer key, gpointer val, gpointer user_data)
++{
++    qemu_plugin_log_printf("print_key_val %d: %016lx=%016lx\n", 
++                                (*(gint*)user_data)++, 
++                                (unsigned long)key, 
++                                (unsigned long)val);
++}
++
++static void print_v2p_entry(gpointer key, gpointer val, gpointer user_data)
++{
++    target_ulong vfn = (target_ulong)key;
++    TLBEntry *ent = (TLBEntry *)val;
++
++    qemu_plugin_log_printf("%016lx\n", vfn);
++
++    for(int i=0;i<8;i++){
++        if((ent->bitmap >> i & 0x1)){
++            qemu_plugin_log_printf("\t%016lx\n", ent->pfn[i]);
++        }
++    }
++}
++
++static void print_v2p_list_entry(gpointer data, gpointer user_data)
++{
++    target_ulong vfn = (target_ulong)data;
++    TLBEntry *ent = (TLBEntry *) g_hash_table_lookup(v2p_map, (gpointer)vfn);
++    if(ent){
++        qemu_plugin_log_printf("%016lx\n", vfn);
++
++        for(int i=0;i<8;i++){
++            if((ent->bitmap >> i & 0x1)){
++                qemu_plugin_log_printf("\t%016lx\n", ent->pfn[i]);
++            }
++        }
++    }
++}
++
++static void print_range_list_entry(gpointer data, gpointer user_data)
++{
++    target_ulong vfn = (target_ulong)data;
++
++    GHashTable* map = (GHashTable*)user_data;
++    if(map == NULL){
++        qemu_plugin_log_printf("map is NULL\n");
++        return;
++    }
++
++    target_ulong size = (target_ulong) g_hash_table_lookup(map, (gpointer)vfn);
++    qemu_plugin_log_printf("%016lx - %016lx\n", vfn, vfn + size);
++}
++
++static gint comp(gconstpointer a, gconstpointer b)
++{
++    target_ulong left = (target_ulong)a;
++    target_ulong right = (target_ulong)b;
++    gint ret = 0;
++
++    if(left != right){
++        if(left < right){
++            ret = -1;
++        }else{
++            ret = 1;
++        }
++    }
++
++    return ret;
++}
++
++static gint comp_reverse(gconstpointer a, gconstpointer b)
++{
++    target_ulong left = (target_ulong)a;
++    target_ulong right = (target_ulong)b;
++    gint ret = 0;
++
++    if(left != right){
++        if(left < right){
++            ret = 1;
++        }else{
++            ret = -1;
++        }
++    }
++
++    return ret;
++}
++
++static void dump_v2p_map(void)
++{
++    qemu_plugin_log_printf("Dump V2P Map\n");
++    qemu_plugin_log_printf("----------------------------------\n");
++
++    GList *keys = g_hash_table_get_keys(v2p_map);
++    GList *lst = g_list_sort(keys, (GCompareFunc)comp);
++
++    g_list_foreach(lst, print_v2p_list_entry, NULL);
++}
++
++static void dump_range_map(GHashTable* map)
++{
++    qemu_plugin_log_printf("Dump Range Map Start\n");
++
++    GList *keys = g_hash_table_get_keys(map);
++    GList *lst = g_list_sort(keys, (GCompareFunc)comp);
++    g_list_foreach(lst, print_range_list_entry, map);
++
++    qemu_plugin_log_printf("Dump Range Map End.\n");
++}
++
++static void print_list(gpointer data, gpointer user_data)
++{
++    qemu_plugin_log_printf("print_list %d: %016lx\n", 
++                                (*(gint*)user_data)++, 
++                                (unsigned long)data);
++}
++
++void dump_sh_mem(gpointer key, gpointer value, gpointer user_data)
++{
++    target_ulong addr = (target_ulong)key;
++    target_ulong size = (target_ulong)value;
++
++    for(int i=0;i<size;i++){
++        target_ulong pa = qemu_plugin_v2p(addr+i);
++        uint8_t v = get_sh_mem_map(pa);
++        qemu_plugin_log_printf("dump_sh_mem v: " 
++                                TARGET_FMT_lx " p: " 
++                                TARGET_FMT_lx " v=%d \n", 
++                                addr+i, pa, v);
++    }
++}
++
++static target_ulong get_target_base(void)
++{
++    GList *keys = g_hash_table_get_keys(g_target_mem_range);
++    GList *lst = g_list_sort(keys, (GCompareFunc)comp);
++    GList *first = g_list_first(lst);
++    return (target_ulong)first->data;
++}
++
++
++/*
++In exec callback, we should use `qemu_plugin_v2p` for phsyical address.
++*/
++static void vcpu_tb_exec(unsigned int cpu_index, void *udata)
++{
++    target_ulong tb_vaddr = (target_ulong) udata;
++
++    if(!g_is_started){
++        goto END;
++    }
++
++#ifdef DEBUG
++    target_ulong cr3 = 0;
++
++#if defined(ARCH_X86)
++    CPUX86State* cpu_state = (CPUX86State*)qemu_plugin_cpu_state(cpu_index);
++    cr3 = cpu_state->cr[3];
++#elif defined(ARCH_MIPS)
++    CPUMIPSState* cpu_state = (CPUMIPSState*)qemu_plugin_cpu_state(cpu_index);
++    cr3 = cpu_state->CP0_EntryHi & cpu_state->CP0_EntryHi_ASID_mask;
++#elif defined(ARCH_PPC)
++    CPUPPCState* cpu_state = (CPUPPCState*)qemu_plugin_cpu_state(cpu_index);
++    cr3 = cpu_state->sr[0];
++    target_ulong msr = cpu_state->msr;
++
++    qemu_plugin_log_printf("tb_exec nip=%016lx %016lx->%016lx msr[ep:%d ir:%d dr:%d] \n", 
++            cpu_state->nip, 
++            g_prev_va,
++            tb_vaddr,
++            ((msr >> MSR_EP)&1),
++            ((msr >> MSR_IR)&1),
++            ((msr >> MSR_DR)&1));
++
++#elif defined(ARCH_SPARC) || defined(ARCH_SPARC64)
++
++#define PS_TCT   (1<<12) /* UA2007, impl.dep. trap on control transfer */
++#define PS_IG    (1<<11) /* v9, zero on UA2007 */
++#define PS_MG    (1<<10) /* v9, zero on UA2007 */
++#define PS_CLE   (1<<9) /* UA2007 */
++#define PS_TLE   (1<<8) /* UA2007 */
++#define PS_RMO   (1<<7)
++#define PS_RED   (1<<5) /* v9, zero on UA2007 */
++#define PS_PEF   (1<<4) /* enable fpu */
++#define PS_AM    (1<<3) /* address mask */
++#define PS_PRIV  (1<<2)
++#define PS_IE    (1<<1)
++#define PS_AG    (1<<0) /* v9, zero on UA2007 */
++    CPUSPARCState* cpu_state = (CPUSPARCState*)qemu_plugin_cpu_state(cpu_index);
++
++#if defined(TARGET_SPARC64)
++    uint32_t pstate = cpu_state->pstate ;
++    uint64_t ag1 = cpu_state->agregs[1];
++#else
++    uint32_t pstate = 0;
++    uint64_t ag1 = 0;
++#endif //defined(TARGET_SPARC64)
++    
++    qemu_plugin_log_printf("tb_exec pc=%016lx "
++                        "%016lx->%016lx "
++                        "[g0:%016lx g1:%016lx "
++                        "g2:%016lx g3:%016lx]\n", 
++                        cpu_state->pc, 
++                        g_prev_va,
++                        tb_vaddr,
++                        cpu_state->gregs[0],
++                        cpu_state->gregs[1],
++                        cpu_state->gregs[2],
++                        cpu_state->gregs[3]);
++
++#endif //defined(ARCH_X86)
++
++#endif //DEBUG
++
++    uint8_t curr_layer = 0xff;
++
++    target_ulong tb_paddr = qemu_plugin_v2p(tb_vaddr);
++
++    if(tb_paddr != (target_ulong)-1){
++        if(!accessible(tb_paddr, false)){
++            qemu_plugin_log_err("accessible failed. "
++                                "tb_paddr=%016lx "
++                                "tb_vaddr=%016lx\n", 
++                                tb_paddr, 
++                                tb_vaddr);
++            goto END;
++        }
++
++        curr_layer = get_sh_mem_map(tb_paddr);
++    }
++
++#if defined(WRITE_SYSCALL)
++    bool is_syscall_dump = false;
++
++    if(is_userland(g_prev_va) && !is_userland(tb_vaddr)){ //userland -> kernel
++
++        //check the tag of `g_prev_va`
++        if(accessible(g_prev_pa, false)){
++
++            qemu_plugin_log_printf("cr3:%016lx U2K: %016lx(%016lx) -> %016lx\n", 
++                cr3, g_prev_va, g_prev_pa, tb_vaddr);
++
++            //qemu_plugin_log_cpu_state();
++        }
++    } 
++    else if(!is_userland(g_prev_va) && is_userland(tb_vaddr)){ //kernel -> userland
++
++        if(accessible(tb_paddr, false)){
++
++            qemu_plugin_log_printf("cr3:%016lx K2U: %016lx(%016lx) -> %016lx\n", 
++                cr3, g_prev_va, g_prev_pa, tb_vaddr);
++
++            //qemu_plugin_log_cpu_state();
++
++            uint8_t pl = get_sh_mem_map(tb_paddr);
++            if(pl != 0xff && pl != 0){
++                is_syscall_dump = true;
++            }
++        }
++    }
++
++#endif //defined(WRITE_SYSCALL)
++
++#if defined(WRITE_EXEC) && defined(WRITE_SYSCALL)
++    if(is_syscall_dump || 
++        ((curr_layer != 0xff) && 
++        (curr_layer > 0) && 
++        (curr_layer != g_curr_layer)))
++    {
++#else //defined(WRITE_EXEC) && defined(WRITE_SYSCALL)
++
++ #if defined(WRITE_EXEC)
++    if((curr_layer != 0xff) && 
++        (curr_layer > 0) && 
++        (curr_layer != g_curr_layer))
++    {
++ #elif defined(WRITE_SYSCALL)
++    if(is_syscall_dump)
++    {
++ #endif
++
++#endif //defined(WRITE_EXEC) && defined(WRITE_SYSCALL)
++
++        target_ulong cr3 = get_pid(cpu_index);
++
++        qemu_plugin_log_printf(
++            "Dump Start @%016lx (%016lx) from %d to %d cr3:%016lx is_syscall_dump:%d\n", 
++            tb_vaddr,
++            tb_paddr, 
++            g_curr_layer, 
++            curr_layer, 
++            cr3,
++            is_syscall_dump);
++
++        //Generate a memory dump
++        if(is_syscall_dump){
++            tlb_dump_target_continuous_memory("S");
++        }else{
++            tlb_dump_target_continuous_memory("E");
++        }
++
++        g_curr_layer = curr_layer;
++    }
++
++    if(is_userland(tb_vaddr)){
++        if(should_cached()){
++            insert_v2p(tb_vaddr, tb_paddr);
++        }
++    }
++
++END:
++    g_prev_va = tb_vaddr;
++    g_prev_pa = tb_paddr;
++
++}
++
++void set_target(gpointer key, gpointer value, gpointer user_data)
++{
++    target_ulong start_addr = (target_ulong)key;
++    target_ulong end_addr = (target_ulong)value;
++
++    qemu_plugin_log_printf("set_target: %016lx - %016lx\n", 
++                            start_addr, 
++                            end_addr);
++
++    target_ulong page_addr = start_addr & TARGET_PAGE_MASK;
++
++    while(page_addr < end_addr){
++        target_ulong page_paddr = qemu_plugin_v2p(page_addr);
++
++        if(page_paddr == (target_ulong)-1){
++            qemu_plugin_log_printf("page_addr:%016lx not resolved\n", 
++                                    page_addr);
++            page_addr += TARGET_PAGE_SIZE;
++            continue;
++        }
++
++        g_mutex_lock(&lock);
++
++        if(accessible(page_paddr, false)){
++            qemu_plugin_log_printf("v: " TARGET_FMT_lx 
++                    " p: " TARGET_FMT_lx "\n", 
++                    page_addr, page_paddr);
++
++            for(target_ulong off = 0; off < TARGET_PAGE_SIZE; off+=1){
++                if(!set_sh_mem_map(page_paddr+off, 1)){
++                    fprintf(stderr, "set_sh_mem_map failed\n");
++                }
++            }
++        }
++        else
++        {
++            qemu_plugin_log_printf("Not accessible. page_addr=" 
++                        TARGET_FMT_lx 
++                        " page_paddr=" 
++                        TARGET_FMT_lx "\n", 
++                        page_addr, page_paddr);
++        }
++
++        g_mutex_unlock(&lock);
++
++        page_addr += TARGET_PAGE_SIZE;
++    }
++}
++
++/*
++In translation callback, we should use `qemu_plugin_v2p` for phsyical address.
++*/
++static void vcpu_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
++{
++    size_t n = qemu_plugin_tb_n_insns(tb);
++
++    target_ulong tb_paddr = 0;
++    target_ulong tb_vaddr = 0;
++
++    for (int i = 0; i < n; i++) {
++
++        struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);
++        target_ulong v_addr = (target_ulong) qemu_plugin_insn_vaddr(insn);
++
++        //Check the execution of the target process.
++        if(g_is_started == false && v_addr == (target_ulong)g_start_addr){
++
++            uint32_t d = 0;
++            if(qemu_plugin_memory_rw(v_addr, 
++                                    (void*)&d, 
++                                    sizeof(uint32_t), 
++                                    false) < 0)
++            {
++                qemu_plugin_log_err("qemu_plugin_memory_rw failed. v_addr=%016lx\n", 
++                        v_addr);
++                return;
++            }
++
++            if(d == g_start_bytes){
++
++                g_is_started = true;
++
++                // Get the range of RAM
++                if(!qemu_plugin_mtree_find_ram(&g_ram_ranges)){
++                    qemu_plugin_log_err("Failed to qemu_plugin_mtree_find_ram\n");
++                    return;
++                }
++
++                //set initial target taint tag
++                g_hash_table_foreach(g_target_mem_range, 
++                                set_target, 
++                                NULL);
++            }
++        }
++
++#ifdef DEBUG
++        uint8_t layer = 0xff;
++
++        target_ulong p_addr = qemu_plugin_v2p(v_addr);
++
++        if(p_addr != (target_ulong)-1 && accessible(p_addr, false)){
++            g_mutex_lock(&lock);
++            layer = get_sh_mem_map(p_addr);
++            g_mutex_unlock(&lock);
++        }
++
++        //target_ulong cr3 = get_pid(cpu_index);
++        target_ulong cr3 = 0;
++
++        if(g_is_started){
++
++            unsigned long page = p_addr & TARGET_PAGE_MASK;
++
++            if(is_userland(v_addr)){
++
++                /*
++                 * Should not use `qemu_plugin_log_printf` because 
++                 * disaseembled instructions contain `%`, which leads
++                 * mis-interpretation as a format string. 
++                */
++
++                char buf[1024];
++                int n = snprintf(buf, 
++                            sizeof(buf), 
++                            "cr3:%016lx(%d) [%d]@%016lx(%016lx): %s\n", 
++                            cr3, 
++                            should_cached(),
++                            layer,
++                            (target_ulong)v_addr,
++                            (target_ulong)p_addr, 
++                            qemu_plugin_insn_disas(insn));
++                assert(n < sizeof(buf));
++                qemu_plugin_outs(buf);
++            }
++
++        }
++
++#endif //DEBUG
++        if(i == 0){
++            tb_vaddr = (target_ulong)v_addr;
++        }
++
++        qemu_plugin_register_vcpu_mem_cb(insn, 
++                                        vcpu_mem_handler,
++                                        QEMU_PLUGIN_CB_NO_REGS,
++                                        rw, 
++                                        (void*)v_addr);
++    }
++
++    //register tb_exec callbacks
++    qemu_plugin_register_vcpu_tb_exec_cb(tb, 
++                                        vcpu_tb_exec,
++                                        QEMU_PLUGIN_CB_NO_REGS, 
++                                        (void *)tb_vaddr);
++}
++
++
++void print_target(gpointer key, gpointer value, gpointer user_data)
++{
++    qemu_plugin_log_printf("key:%016lx value:%016lx\n", 
++                            (uint64_t)key, (uint64_t)value);
++}
++
++QEMU_PLUGIN_EXPORT int qemu_plugin_install(qemu_plugin_id_t id,
++                                           const qemu_info_t *info,
++                                           int argc, 
++                                           char **argv)
++{
++    int i;
++
++    uuid[0] = '\0';
++
++    for (i = 0; i < argc; i++) {
++        char *p = argv[i];
++
++        if (strncmp(p, "start_addr:", 11) == 0) {
++            g_start_addr = (target_ulong)strtoull((const char*)&p[11], NULL, 16);
++            qemu_plugin_log_printf("start_addr:" TARGET_FMT_lx "\n", g_start_addr);
++        }
++
++        if (strncmp(p, "kernel_base:", 12) == 0) {
++            target_ulong kernel_base = (target_ulong)strtoull((const char*)&p[12], NULL, 16);
++            set_user_limit(kernel_base);
++            qemu_plugin_log_printf("kernel_base:" TARGET_FMT_lx "\n", kernel_base);
++            qemu_plugin_log_printf("g_user_limit:" TARGET_FMT_lx "\n", g_user_limit);
++        }
++
++        if (strncmp(p, "start_bytes:", 12) == 0) {
++            g_start_bytes = (uint32_t)strtoull((const char*)&p[12], NULL, 16);
++            qemu_plugin_log_printf("start_bytes:0x%x\n", g_start_bytes);
++        }
++
++        //e.g. target_range:0x10000000:0x10001000
++        if (strncmp(p, "target_range:", 13) == 0) {
++
++            target_ulong target_addr = 0;
++            target_ulong target_size = 0;
++
++            if(g_target_mem_range == NULL){
++                g_target_mem_range = g_hash_table_new(g_direct_hash, g_direct_equal);
++            }
++
++            char* ptr = strtok((char*)&p[13], ":");
++            target_addr = (target_ulong)strtoull((const char*)ptr, NULL, 16);
++
++            ptr = strtok(NULL, ":");
++            target_size = (target_ulong)strtoull((const char*)ptr, NULL, 16);
++
++            g_hash_table_insert(g_target_mem_range, 
++                                (gpointer)(target_addr), 
++                                (gpointer)target_size);
++
++            if(target_addr < g_user_base){
++                g_user_base = target_addr;
++            }
++
++            if(g_base_addr == 0){
++                g_base_addr = target_addr;
++            }
++        }
++
++        if (strncmp(p, "uuid:", 5) == 0) {
++            strncpy(uuid, (const char*)&p[5], 36);
++            uuid[36] = '\0';
++            qemu_plugin_log_printf("uuid:%s\n", uuid);
++        } 
++    }
++
++    qemu_plugin_log_printf("g_user_base: %016lx\n", g_user_base);
++
++    g_hash_table_foreach(g_target_mem_range, 
++                        print_target, 
++                        NULL);
++
++    our_id = id;
++
++    if(g_start_addr == 0){
++        fprintf(stderr, "Need to specfiy `start_addr`\n");
++        return -1;
++    }
++
++    is_system = info->system_emulation;
++    if(!is_system){
++        fprintf(stderr, "System Emulation Only\n");
++        return -1;
++    }
++
++    if(strlen(uuid) == 0){
++        fprintf(stderr, "Need to specify `uuid`\n");
++        return -1;
++    }
++
++    plugin_init();
++
++    qemu_plugin_register_vcpu_tb_trans_cb(id, vcpu_tb_trans);
++    qemu_plugin_register_atexit_cb(id, plugin_exit, NULL);
++
++    mkdir("/tmp/dump", 0777);
++
++    return 0;
++}
++
++
++
++
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/include/exec/cpu-all.h qemu/include/exec/cpu-all.h
+--- ../raid_public/qemu-orig/include/exec/cpu-all.h	2023-09-22 11:46:42.614170987 +0900
++++ qemu/include/exec/cpu-all.h	2023-10-02 11:24:28.716560454 +0900
+@@ -271,8 +271,12 @@ extern intptr_t qemu_host_page_mask;
+ #define PAGE_TARGET_1  0x0200
+ #define PAGE_TARGET_2  0x0400
+ 
++
+ #if defined(CONFIG_USER_ONLY)
+ void page_dump(FILE *f);
++#ifdef CONFIG_XUNPACK
++void page_fdump(void *cpu, char* dir);
++#endif
+ 
+ typedef int (*walk_memory_regions_fn)(void *, target_ulong,
+                                       target_ulong, unsigned long);
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/include/exec/memory.h qemu/include/exec/memory.h
+--- ../raid_public/qemu-orig/include/exec/memory.h	2023-09-22 12:54:30.392753057 +0900
++++ qemu/include/exec/memory.h	2023-10-02 11:26:57.758235976 +0900
+@@ -2097,6 +2097,29 @@ void memory_global_dirty_log_stop(void);
+ 
+ void mtree_info(bool flatview, bool dispatch_tree, bool owner, bool disabled);
+ 
++#ifdef CONFIG_XUNPACK
++typedef struct AddrRange AddrRange;
++
++struct AddrRange {
++    Int128 start;
++    Int128 size;
++};
++
++typedef struct FindRamCBData FindRamCBData;
++
++#define CBDATA_SZ   16
++
++struct FindRamCBData {
++    uint32_t n_mr;
++    MemoryRegion *mr[CBDATA_SZ]; 
++    AddrRange ar[CBDATA_SZ]; 
++    ram_addr_t ram_addr[CBDATA_SZ];
++    hwaddr offset_in_region[CBDATA_SZ];
++};
++
++bool mtree_find_ram(MemoryRegion *mr, FindRamCBData *cbdata);
++#endif
++
+ /**
+  * memory_region_dispatch_read: perform a read directly to the specified
+  * MemoryRegion.
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/include/qemu/plugin.h qemu/include/qemu/plugin.h
+--- ../raid_public/qemu-orig/include/qemu/plugin.h	2023-09-22 12:54:30.396753469 +0900
++++ qemu/include/qemu/plugin.h	2023-10-02 11:27:35.131346886 +0900
+@@ -13,6 +13,11 @@
+ #include "qemu/queue.h"
+ #include "qemu/option.h"
+ 
++#ifdef CONFIG_XUNPACK
++#include "exec/cpu-common.h"
++extern ram_addr_t ram_size;
++#endif
++
+ /*
+  * Events that plugins can subscribe to.
+  */
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/include/qemu/qemu-plugin.h qemu/include/qemu/qemu-plugin.h
+--- ../raid_public/qemu-orig/include/qemu/qemu-plugin.h	2023-09-22 12:54:30.396753469 +0900
++++ qemu/include/qemu/qemu-plugin.h	2023-10-02 11:30:24.333907053 +0900
+@@ -555,4 +555,40 @@ int qemu_plugin_n_max_vcpus(void);
+  */
+ void qemu_plugin_outs(const char *string);
+ 
++#ifdef CONFIG_XUNPACK
++
++/* The below functions are added for Xunpack Research */
++
++#include "exec/hwaddr.h"
++int qemu_plugin_memory_rw(uint64_t vaddr, void *ptr, uint64_t len, bool is_write);
++int qemu_plugin_physical_memory_rw(uint64_t vaddr, void *ptr, uint64_t len, bool is_write);
++void qemu_plugin_dump_pages(char* dir, uint32_t cpu_index, uint64_t limit);
++//void qemu_plugin_log_cpu_state(FILE *fd);
++struct qemu_plugin_hwaddr *qemu_plugin_get_hwaddr_v(uint64_t vaddr);
++void* qemu_plugin_cpu_state(uint32_t cpu_index);
++hwaddr qemu_plugin_v2p(uint64_t vaddr);
++bool qemu_plugin_cpu_paging_enabled(void);
++
++typedef uintptr_t ram_addr_t;
++ram_addr_t qemu_plugin_get_ram_size(void);
++void qemu_plugin_vm_stop(void);
++void qemu_plugin_vm_start(void);
++
++typedef struct RamRange{
++    uint64_t addr;
++    uint64_t size;
++    uint64_t view_addr;
++    hwaddr offset_in_region;
++    ram_addr_t ram_addr;
++}RamRange;
++
++typedef struct RamRanges{
++    uint32_t n_rr;
++    RamRange rr[16];
++}RamRanges;
++
++bool qemu_plugin_mtree_find_ram(RamRanges* rr);
++void qemu_plugin_log_cpu_state(void);
++#endif
++
+ #endif /* QEMU_PLUGIN_API_H */
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/include/tcg/tcg.h qemu/include/tcg/tcg.h
+--- ../raid_public/qemu-orig/include/tcg/tcg.h	2023-09-22 12:54:30.400753881 +0900
++++ qemu/include/tcg/tcg.h	2023-10-02 11:31:57.934637837 +0900
+@@ -1517,4 +1517,8 @@ static inline const TCGOpcode *tcg_swap_
+ 
+ bool tcg_can_emit_vecop_list(const TCGOpcode *, TCGType, unsigned);
+ 
++#ifdef CONFIG_XUNPACK
++void dump_regs(TCGContext *s);
++#endif
++
+ #endif /* TCG_H */
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/plugins/api.c qemu/plugins/api.c
+--- ../raid_public/qemu-orig/plugins/api.c	2023-09-22 12:54:30.424756351 +0900
++++ qemu/plugins/api.c	2023-10-02 11:33:54.681834242 +0900
+@@ -44,6 +44,17 @@
+ #ifndef CONFIG_USER_ONLY
+ #include "qemu/plugin-memory.h"
+ #include "hw/boards.h"
++
++#ifdef CONFIG_XUNPACK
++#include "sysemu/runstate.h"
++#include "sysemu/sysemu.h"
++#include "sysemu/block-backend.h"
++
++#include "qapi/qapi-commands-misc.h"
++#include "exec/address-spaces.h"
++#include "exec/memory.h"
++#include "qemu/int128.h"
++#endif
+ #endif
+ #include "trace/mem.h"
+ 
+@@ -377,3 +388,307 @@ void qemu_plugin_outs(const char *string
+ {
+     qemu_log_mask(CPU_LOG_PLUGIN, "%s", string);
+ }
++
++#ifdef CONFIG_XUNPACK
++/*
++ * Memory Read Write
++ */
++
++#include "exec/cpu-all.h"
++
++int qemu_plugin_memory_rw(uint64_t vaddr, void *ptr, uint64_t len, bool is_write)
++{
++    CPUState *cpu = current_cpu;
++    return cpu_memory_rw_debug(cpu, vaddr, ptr, len, is_write);
++}
++
++#ifdef CONFIG_SOFTMMU
++int qemu_plugin_physical_memory_rw(uint64_t addr, void *buf, uint64_t len, bool is_write)
++{
++    cpu_physical_memory_rw(addr, buf, len, is_write);
++    return 0;
++}
++#endif
++
++#include "exec/hwaddr.h"
++#include "sysemu/hw_accel.h"
++#include "hw/core/cpu.h"
++#include "exec/address-spaces.h"
++
++bool qemu_plugin_cpu_paging_enabled(void)
++{
++#ifdef CONFIG_USER_ONLY
++    return false;
++#else
++    CPUState *cpu = current_cpu;
++    return cpu_paging_enabled(cpu);
++#endif
++}
++
++hwaddr qemu_plugin_v2p(uint64_t addr)
++{
++#ifdef CONFIG_USER_ONLY
++    return 0;
++#else
++
++    hwaddr phys_addr;
++    target_ulong page;
++
++    CPUState *cpu = current_cpu;
++
++    cpu_synchronize_state(cpu);
++
++    MemTxAttrs attrs;
++    page = ((target_ulong)addr) & TARGET_PAGE_MASK;
++
++    phys_addr = cpu_get_phys_page_attrs_debug(cpu, page, &attrs);
++    if (phys_addr == -1){
++        return -1;
++    }
++
++    phys_addr += (addr & ~TARGET_PAGE_MASK);
++
++    return phys_addr;
++#endif
++}
++
++
++#ifdef CONFIG_USER_ONLY
++
++#include "hw/core/cpu.h"
++#include "qemu/log.h"
++
++void qemu_plugin_dump_pages(char* dir, uint32_t cpu_index, uint64_t limit)
++{
++    CPUState *cpu = current_cpu;
++    page_fdump((void*)cpu, dir);
++}
++
++#if 0
++void qemu_plugin_log_cpu_state(FILE *fd)
++{
++    CPUState *cpu = current_cpu;
++
++    rcu_read_lock();
++    cpu_dump_state(cpu, fd, 0);
++    rcu_read_unlock();
++}
++#endif
++
++#else //CONFIG_USER_ONLY
++
++static int fmemdump(CPUState*env, char* fn, uint64_t start, uint64_t end)
++{
++    uint64_t size = end - start;
++
++    FILE *fd = fopen(fn, "wb");
++    if(!fd){
++        fprintf(stderr, "fopen failed\n");
++        return -1;
++    }
++
++    uint8_t buf[1024];
++    uint32_t l;
++
++    while(size != 0){
++        l = sizeof(buf);
++        if(l > size)
++            l = size;
++
++        if(cpu_memory_rw_debug(env, start, buf, l, false) != 0){
++            fprintf(stderr, "cpu_memory_rw_debug failed\n");
++            goto exit;
++        }
++
++        if(fwrite(buf, 1, l, fd) != l){
++            fprintf(stderr, "fwrite failed\n");
++            goto exit;
++        }
++
++        start += l;
++        size  -= l;
++    }
++
++exit:
++
++    if(fd){
++        fclose(fd);
++        fd = NULL;
++    }
++
++    return 0;
++}
++
++void qemu_plugin_dump_pages(char* dir, uint32_t cpu_index, uint64_t limit)
++{
++    CPUState *cpu;
++    const target_ulong page_size = TARGET_PAGE_SIZE;
++
++    int64_t addr = 0;
++
++    cpu = qemu_get_cpu(cpu_index);
++    if (cpu == NULL) {
++        fprintf(stderr, "qemu_get_cpu failed");
++        return;
++    }
++
++    uint64_t cont_addr = 0;
++    uint64_t cont_size = 0;
++
++    qemu_plugin_outs("----qemu_plugin_dump_pages----\n");
++
++    while(addr < limit){
++
++        cont_addr = addr;
++        cont_size = 0;
++
++        char buf[page_size];
++
++        while(cpu_memory_rw_debug(cpu, 
++                                cont_addr+cont_size, 
++                                buf, 
++                                page_size, 
++                                false) == 0) 
++        {
++            cont_size += page_size;
++            if(cont_addr+cont_size >= limit){
++                break;
++            }
++        }
++
++        if(cont_size && cont_addr != 0){
++            g_autofree gchar* out = g_strdup_printf("%016lx - %016lx\n", 
++                                    cont_addr, 
++                                    cont_addr + cont_size);
++            qemu_plugin_outs(out);
++
++            g_autofree gchar* fn = g_strdup_printf("%s/%016lx-%016lx.raw", 
++                                    dir, 
++                                    cont_addr, 
++                                    (cont_addr+cont_size));
++
++            if(fmemdump(cpu, fn, cont_addr, cont_addr+cont_size) < 0){
++                fprintf(stderr, "fmemdump failed\n");
++                return;
++            }
++        }
++
++        cont_size += page_size;
++        addr += cont_size;
++    }
++
++    qemu_plugin_outs("=======================\n");
++
++    return;
++
++}
++#endif //CONFIG_USER_ONLY
++
++
++void qemu_plugin_vm_stop(void)
++{
++}
++
++void qemu_plugin_vm_start(void)
++{
++}
++
++bool qemu_plugin_mtree_find_ram(RamRanges *rrs)
++{
++#ifdef CONFIG_SOFTMMU
++    FindRamCBData cbdata;
++
++    g_autofree gchar* out = g_strdup_printf("qemu_plugin_mtree_find_ram\n");
++    qemu_plugin_outs(out);
++
++    if(!mtree_find_ram(get_system_memory(), &cbdata)){
++        fprintf(stderr, "mtree_find_ram failed\n");
++        return false;
++    }
++
++    g_autofree gchar* out2 = g_strdup_printf("cbdata.n_mr=%d\n", cbdata.n_mr);
++    qemu_plugin_outs(out2);
++
++    if(cbdata.n_mr > sizeof(rrs->rr)/sizeof(rrs->rr[0])){
++        fprintf(stderr, "rr->n_rr is lower than n_mr\n");
++        return false;
++    }
++
++    rrs->n_rr = cbdata.n_mr;
++
++    for(int i=0;i<cbdata.n_mr;i++){
++
++        g_autofree gchar* out = g_strdup_printf("ar[%d] %016lx-%016lx\n", 
++                i, 
++                int128_get64(cbdata.ar[i].start), 
++                int128_get64(cbdata.ar[i].start)+int128_get64(cbdata.ar[i].size));
++        qemu_plugin_outs(out);
++
++        rrs->rr[i].addr = (uint64_t)(cbdata.mr[i]->addr);
++        rrs->rr[i].size = int128_get64(cbdata.ar[i].size);
++        rrs->rr[i].view_addr = int128_get64(cbdata.ar[i].start);
++        rrs->rr[i].offset_in_region = cbdata.offset_in_region[i];
++        rrs->rr[i].ram_addr = cbdata.ram_addr[i];
++    }
++
++#endif
++    return true;
++}
++
++ram_addr_t qemu_plugin_get_ram_size(void)
++{
++#ifdef CONFIG_USER_ONLY
++    return 0;
++#else
++    return ram_size;
++#endif
++}
++
++struct qemu_plugin_hwaddr *qemu_plugin_get_hwaddr_v(uint64_t vaddr)
++{
++#ifdef CONFIG_SOFTMMU
++    CPUState *cpu = current_cpu;
++    //unsigned int mmu_idx = info >> TRACE_MEM_MMU_SHIFT;
++    hwaddr_info.is_store = false;
++
++    //Should it be true or false?
++    if (!tlb_plugin_lookup(cpu, vaddr, 2, true, &hwaddr_info)) {
++        error_report("invalid use of qemu_plugin_get_hwaddr");
++        return NULL;
++    }
++
++    return &hwaddr_info;
++#else
++    return NULL;
++#endif
++}
++
++
++#if 0
++void* qemu_plugin_cpu_state(void)
++{
++    return current_cpu->env_ptr;
++}
++#else
++void* qemu_plugin_cpu_state(uint32_t cpu_index)
++{
++    CPUState *cpu;
++    cpu = qemu_get_cpu(cpu_index);
++    if (cpu == NULL) {
++        fprintf(stderr, "qemu_get_cpu failed");
++        return NULL;
++    }
++    return current_cpu->env_ptr;
++}
++#endif
++
++#include "exec/log.h"
++void qemu_plugin_log_cpu_state(void)
++{
++#ifdef CONFIG_SOFTMMU
++    CPUState *cpu = current_cpu;
++    log_cpu_state(cpu, 0);
++#endif
++}
++
++#endif //CONFIG_XUNPACK
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/plugins/qemu-plugins.symbols qemu/plugins/qemu-plugins.symbols
+--- ../raid_public/qemu-orig/plugins/qemu-plugins.symbols	2023-09-22 12:54:30.424756351 +0900
++++ qemu/plugins/qemu-plugins.symbols	2021-12-06 18:24:21.717622119 +0900
+@@ -31,10 +31,19 @@
+   qemu_plugin_mem_is_big_endian;
+   qemu_plugin_mem_is_store;
+   qemu_plugin_get_hwaddr;
++  qemu_plugin_get_hwaddr_v;
+   qemu_plugin_hwaddr_is_io;
+   qemu_plugin_hwaddr_to_raddr;
+   qemu_plugin_vcpu_for_each;
+   qemu_plugin_n_vcpus;
+   qemu_plugin_n_max_vcpus;
+   qemu_plugin_outs;
++  qemu_plugin_memory_rw;
++  qemu_plugin_physical_memory_rw;
++  qemu_plugin_dump_pages;
++  qemu_plugin_dump_tcg_regs;
++  qemu_plugin_cpu_state;
++  qemu_plugin_v2p;
++  qemu_plugin_log_cpu_state;
++  qemu_plugin_get_ram_size;
+ };
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/scripts/qmp/guest_terminate.py qemu/scripts/qmp/guest_terminate.py
+--- ../raid_public/qemu-orig/scripts/qmp/guest_terminate.py	1970-01-01 09:00:00.000000000 +0900
++++ qemu/scripts/qmp/guest_terminate.py	2021-12-26 09:35:50.319918821 +0900
+@@ -0,0 +1,40 @@
++#!/usr/bin/env python3
++
++import sys
++import os
++
++sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..', 'python'))
++from qemu.qmp import QEMUMonitorProtocol
++
++args = sys.argv[1:]
++socket_path = None
++path = None
++prop = None
++
++def usage():
++    pass
++
++def usage_error(error_msg = "unspecified error"):
++    exit(1)
++
++if len(args) > 0:
++    if args[0] == "-h":
++        print(usage())
++        exit(0);
++    elif args[0] == "-s":
++        try:
++            socket_path = args[1]
++        except:
++            usage_error("missing argument: QMP socket path or address");
++        args = args[2:]
++
++if not socket_path:
++    if 'QMP_SOCKET' in os.environ:
++        socket_path = os.environ['QMP_SOCKET']
++    else:
++        usage_error("no QMP socket path or address given");
++
++srv = QEMUMonitorProtocol(socket_path)
++srv.connect()
++rsp = srv.command('quit')
++print(rsp)
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/softmmu/memory.c qemu/softmmu/memory.c
+--- ../raid_public/qemu-orig/softmmu/memory.c	2023-09-22 12:54:30.432757173 +0900
++++ qemu/softmmu/memory.c	2023-10-02 13:41:29.290422634 +0900
+@@ -49,16 +49,20 @@ static QTAILQ_HEAD(, AddressSpace) addre
+ 
+ static GHashTable *flat_views;
+ 
++#ifndef CONFIG_XUNPACK
+ typedef struct AddrRange AddrRange;
++#endif
+ 
+ /*
+  * Note that signed integers are needed for negative offsetting in aliases
+  * (large MemoryRegion::alias_offset).
+  */
++#ifndef CONFIG_XUNPACK
+ struct AddrRange {
+     Int128 start;
+     Int128 size;
+ };
++#endif
+ 
+ static AddrRange addrrange_make(Int128 start, Int128 size)
+ {
+@@ -2923,6 +2927,90 @@ static void mtree_print_mr_owner(const M
+     }
+ }
+ 
++#ifdef CONFIG_XUNPACK
++
++static bool find_ram_cb(Int128 start, Int128 len, const MemoryRegion *mr,
++                        hwaddr offset_in_region, void *opaque)
++{
++    FindRamCBData *cbdata = opaque;
++
++    if(mr->ram && !mr->readonly){
++
++        //the index overflow. exit the loop right now.
++        if(cbdata->n_mr > (sizeof(cbdata->mr)/sizeof(MemoryRegion*))){
++            return true;
++        }
++
++        //skip vram region
++        if(strncmp(mr->name, "vga.vram", 8) == 0 ||
++            strncmp(mr->name, "tcx.vram", 8) == 0)
++        {
++            return false;
++        }
++
++        cbdata->mr[cbdata->n_mr] = (MemoryRegion*)mr;
++        cbdata->ar[cbdata->n_mr].start = start;
++        cbdata->ar[cbdata->n_mr].size = len;
++        cbdata->offset_in_region[cbdata->n_mr] = offset_in_region;
++        cbdata->ram_addr[cbdata->n_mr] = memory_region_get_ram_addr((MemoryRegion *)mr) + offset_in_region;
++        cbdata->n_mr++;
++
++        char buf[1024];
++        snprintf(buf, sizeof(buf), "find_ram_cb: "
++                " mr->addr " TARGET_FMT_plx
++                " mr->name %s" 
++                " mr->size " TARGET_FMT_plx 
++                " alias %d"
++                " start " TARGET_FMT_plx 
++                " type %s"
++                " ram_addr " TARGET_FMT_plx
++                " offset_in_region " TARGET_FMT_plx "\n",
++                mr->addr, 
++                mr->name, 
++                int128_get64(mr->size),
++                (mr->alias == NULL), 
++                int128_get64(start), 
++                memory_region_type((MemoryRegion *)mr), 
++                memory_region_get_ram_addr((MemoryRegion *)mr),
++                offset_in_region);
++        qemu_plugin_outs(buf);
++    }
++
++    return false;
++}
++
++
++bool mtree_find_ram(MemoryRegion *mr, FindRamCBData *cbdata)
++{
++    hwaddr addr = 0;
++    MemoryRegion *root;
++    AddressSpace *as;
++    FlatView *view;
++
++    if(cbdata == NULL || mr == NULL){
++        return false;
++    }
++
++    addr = mr->addr;
++    for (root = mr; root->container; ) {
++        root = root->container;
++        addr += root->addr;
++    }
++
++    as = memory_region_to_address_space(root);
++    if (!as) {
++        return false;
++    }
++
++    cbdata->n_mr = 0;
++
++    view = address_space_to_flatview(as);
++    flatview_for_each_range(view, find_ram_cb, cbdata);
++
++    return true;
++}
++#endif
++
+ static void mtree_print_mr(const MemoryRegion *mr, unsigned int level,
+                            hwaddr base,
+                            MemoryRegionListHead *alias_print_queue,
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/softmmu/vl.c qemu/softmmu/vl.c
+--- ../raid_public/qemu-orig/softmmu/vl.c	2023-09-22 12:54:30.432757173 +0900
++++ qemu/softmmu/vl.c	2023-10-02 11:39:16.485480628 +0900
+@@ -140,6 +140,12 @@ typedef struct ObjectOption {
+     QTAILQ_ENTRY(ObjectOption) next;
+ } ObjectOption;
+ 
++#ifdef CONFIG_XUNPACK
++ram_addr_t ram_size;
++#else
++static ram_addr_t ram_size;
++#endif
++
+ static const char *cpu_option;
+ static const char *mem_path;
+ static const char *incoming;
+@@ -154,7 +160,6 @@ static QemuPluginList plugin_list = QTAI
+ static BlockdevOptionsQueue bdo_queue = QSIMPLEQ_HEAD_INITIALIZER(bdo_queue);
+ static bool nographic = false;
+ static int mem_prealloc; /* force preallocation of physical target memory */
+-static ram_addr_t ram_size;
+ static const char *vga_model = NULL;
+ static DisplayOptions dpy;
+ static int num_serial_hds;
+diff '--exclude=build' '--exclude=capstone' '--exclude=__pycache__' '--exclude=dtc' '--exclude=tests' '--exclude=ui' '--exclude=.*' '--exclude=meson' '--exclude=slirp' -r -u -p -N ../raid_public/qemu-orig/tcg/tcg.c qemu/tcg/tcg.c
+--- ../raid_public/qemu-orig/tcg/tcg.c	2023-09-22 12:54:30.480762114 +0900
++++ qemu/tcg/tcg.c	2023-10-02 11:40:12.037423054 +0900
+@@ -3413,7 +3413,11 @@ static bool liveness_pass_2(TCGContext *
+ }
+ 
+ #ifdef CONFIG_DEBUG_TCG
++#ifdef CONFIG_XUNPACK
+ static void dump_regs(TCGContext *s)
++#else
++void dump_regs(TCGContext *s)
++#endif
+ {
+     TCGTemp *ts;
+     int i;

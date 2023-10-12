@@ -1,0 +1,14 @@
+
+[run]
+branch = True
+concurrency = multiprocessing
+source =
+    zelos
+
+[paths]
+source =
+   src
+   .tox/*/site-packages
+
+[report]
+show_missing = True

@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+
+# Debian ifupdown needs the /run/unpack lock directory
+mkdir -p /run/unpack
+
+case "$1" in
+  start)
+    printf "Starting unpacker: "
+    cd /root/
+    #echo 0 > /proc/sys/vm/vdso_enabled
+    # packer comb
+    ELFCRYPT=password ./malware.exe
+    #ELFCRYPT=aaaa ./malware.exe
+    #./malware.exe
+    #sleep 90
+    #poweroff
+    ;;
+  *)
+    echo "Usage: $0 {start}"
+    exit 1
+esac
+
+exit $?
